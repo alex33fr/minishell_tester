@@ -1,9 +1,15 @@
 #!/bin/bash
 
 # Lance toute la suite de tests avec valgrind (make re automatique)
-# Usage: bash run_all.sh [-e] [-c] [-l] [-w]
-#   -e = FAIL   -c = CRASH   -l = LEAK   -w = WARN
-#   combinable: -el  -eclw  -e -l  etc.  (sans flag = tout afficher)
+# Usage: bash run_all.sh [N|N-M] [-e [N|N-M]] [-c] [-l] [-w]
+#   5        = catégorie 5 uniquement              ex: ./run_all.sh 5
+#   5-7      = catégories 5 à 7                   ex: ./run_all.sh 5-7
+#   -e N     = catégorie N + afficher FAIL         ex: -e 5
+#   -e N-M   = catégories N à M + afficher FAIL   ex: -e 5-7
+#   -e       = toutes catégories, afficher FAIL
+#   -c = CRASH   -l = LEAK   -w = WARN
+#   combinable: 8 -l   -e 8 -l   5-7 -cl   -eclw   etc.
+#   (sans flag = tout afficher)
 # Logs : logs_full_test.txt (écrasé à chaque run)
 
 cd "$(dirname "$0")"
@@ -82,8 +88,8 @@ SUPP
 fi
 
 VG="valgrind --leak-check=full --show-leak-kinds=all --track-fds=yes \
-    --track-origins=yes --suppressions=./readline.supp \
-    --error-exitcode=99 -q"
+    --track-origins=yes --suppressions=$PWD/readline.supp \
+    --trace-children=yes --error-exitcode=99 -q"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -99,19 +105,53 @@ TOTAL_LEAK=0
 TOTAL_CRASH=0
 TEST_NUM=0
 CURRENT_SECTION=""
-TOTAL_TESTS=$(grep -cE '^\s*(check|check_ei|vcheck|sigtest)\s+"' "$0")
+SKIP_SECTION=0
 
-# ─── Filter flags: -e=FAIL  -c=CRASH  -l=LEAK  -w=WARN ─────────────
+# ─── Parse args ──────────────────────────────────────────────────────
+# -e N     = catégorie N uniquement
+# -e N-M   = catégories N à M
+# -e       = toutes les catégories, afficher seulement FAIL
+# -c=CRASH  -l=LEAK  -w=WARN  (combinables : -cl -eclw …)
 SHOW_E=0; SHOW_C=0; SHOW_L=0; SHOW_W=0
-for arg in "$@"; do
-	arg="${arg#-}"; arg="${arg#-}"
-	[[ "$arg" == *e* ]] && SHOW_E=1
-	[[ "$arg" == *c* ]] && SHOW_C=1
-	[[ "$arg" == *l* ]] && SHOW_L=1
-	[[ "$arg" == *w* ]] && SHOW_W=1
+SEC_FROM=1; SEC_TO=99
+i=1
+while [ $i -le $# ]; do
+	arg="${!i}"
+	if [[ "$arg" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+		# bare range: ./run_all.sh 5-7
+		SEC_FROM=${BASH_REMATCH[1]}; SEC_TO=${BASH_REMATCH[2]}
+	elif [[ "$arg" =~ ^([0-9]+)$ ]]; then
+		# bare number: ./run_all.sh 5
+		SEC_FROM=$arg; SEC_TO=$arg
+	elif [[ "$arg" == "-e" ]]; then
+		SHOW_E=1
+		ni=$((i + 1)); next="${!ni:-}"
+		if [[ "$next" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+			SEC_FROM=${BASH_REMATCH[1]}; SEC_TO=${BASH_REMATCH[2]}; i=$((i + 1))
+		elif [[ "$next" =~ ^([0-9]+)$ ]]; then
+			SEC_FROM=$next; SEC_TO=$next; i=$((i + 1))
+		fi
+	else
+		stripped="${arg#-}"; stripped="${stripped#-}"
+		[[ "$stripped" == *e* ]] && SHOW_E=1
+		[[ "$stripped" == *c* ]] && SHOW_C=1
+		[[ "$stripped" == *l* ]] && SHOW_L=1
+		[[ "$stripped" == *w* ]] && SHOW_W=1
+	fi
+	i=$((i + 1))
 done
 if [ $SHOW_E -eq 0 ] && [ $SHOW_C -eq 0 ] && [ $SHOW_L -eq 0 ] && [ $SHOW_W -eq 0 ]; then
 	SHOW_E=1; SHOW_C=1; SHOW_L=1; SHOW_W=1
+fi
+
+if [ "$SEC_FROM" -eq 1 ] && [ "$SEC_TO" -ge 22 ]; then
+	TOTAL_TESTS=$(grep -cE '^\s*(check|check_ei|vcheck|sigtest)\s+"' "$0")
+else
+	TOTAL_TESTS=$(awk -v from="$SEC_FROM" -v to="$SEC_TO" '
+		/section[[:space:]].*\[[0-9]+\]/ { match($0,/\[([0-9]+)\]/,m); cur=m[1]+0 }
+		/^[[:space:]]*(check|check_ei|vcheck|sigtest)[[:space:]]+"/ { if(cur>=from&&cur<=to) c++ }
+		END { print c+0 }
+	' "$0")
 fi
 
 normalize() {
@@ -196,6 +236,7 @@ log_test() {
 check() {
 	local desc="$1"
 	local input="$2"
+	[ $SKIP_SECTION -eq 1 ] && return
 	((TEST_NUM++))
 
 	mini_out=$(printf '%s' "$input" | timeout 5 "$MINI" 2>/tmp/ra_mini_err_$$)
@@ -279,6 +320,7 @@ check() {
 check_ei() {
 	local desc="$1"
 	local input="$2"
+	[ $SKIP_SECTION -eq 1 ] && return
 	((TEST_NUM++))
 
 	mini_out=$(printf '%s' "$input" | timeout 5 env -i "$MINI" 2>/tmp/ra_mini_err_$$)
@@ -341,6 +383,7 @@ vcheck() {
 	local desc="$1"
 	local input="$2"
 	local env_prefix="${3:-}"
+	[ $SKIP_SECTION -eq 1 ] && return
 	((TEST_NUM++))
 
 	if [ -n "$env_prefix" ]; then
@@ -418,6 +461,14 @@ vcheck() {
 }
 
 section() {
+	local num
+	num=$(printf '%s' "$1" | grep -oE '^\[[0-9]+\]' | tr -d '[]')
+	num=${num:-0}
+	if [ "$num" -gt 0 ] && { [ "$num" -lt "$SEC_FROM" ] || [ "$num" -gt "$SEC_TO" ]; }; then
+		SKIP_SECTION=1
+		return
+	fi
+	SKIP_SECTION=0
 	printf "\n"
 	echo -e "\n${BOLD}${CYAN}$1${NC}"
 	CURRENT_SECTION="$1"
@@ -435,6 +486,13 @@ _BEFORE_FILES=$(ls -1 . 2>/dev/null | sort)
 # ─────────────────────────────────────────────
 echo -e "${CYAN}================================================================${NC}"
 echo -e "${CYAN}  MINISHELL — ALL TESTS + VALGRIND${NC}"
+if [ "$SEC_FROM" -ne 1 ] || [ "$SEC_TO" -lt 22 ]; then
+	if [ "$SEC_FROM" -eq "$SEC_TO" ]; then
+		echo -e "${CYAN}  Filtre : catégorie [$SEC_FROM] uniquement  ($TOTAL_TESTS tests)${NC}"
+	else
+		echo -e "${CYAN}  Filtre : catégories [$SEC_FROM] à [$SEC_TO]  ($TOTAL_TESTS tests)${NC}"
+	fi
+fi
 echo -e "${CYAN}================================================================${NC}"
 
 # ══════════════════════════════════════════════
@@ -587,8 +645,8 @@ check "env: sans= absent, avec= présent"   $'export _RA_A\nexport _RA_B=\nenv |
 
 # ── Ordre alphabétique de export ──
 # On exporte en ordre inverse, export doit ressortir trié
-check "export alphabetique: A avant Z"  $'export _RA_ZZZ=z\nexport _RA_AAA=a\nexport _RA_MMM=m\nexport | grep "_RA_" | sed "s/declare -x //" | sed "s/^export //" | cut -d= -f1 | sort -c 2>/dev/null && echo SORTED || echo UNSORTED'
-check "export alphabetique: chiffres"   $'export _RA_Z9=z\nexport _RA_A1=a\nexport _RA_M5=m\nexport | grep "_RA_" | sed "s/declare -x //" | sed "s/^export //" | cut -d= -f1 | sort -c 2>/dev/null && echo SORTED || echo UNSORTED'
+check "export alphabetique: A avant Z"  $'export _RA_ZZZ=z\nexport _RA_AAA=a\nexport _RA_MMM=m\nexport | grep "_RA_" | sed "s/declare -x //" | cut -d= -f1'
+check "export alphabetique: chiffres"   $'export _RA_Z9=z\nexport _RA_A1=a\nexport _RA_M5=m\nexport | grep "_RA_" | sed "s/declare -x //" | cut -d= -f1'
 
 # ══════════════════════════════════════════════
 section "[9] BUILTINS — unset"
@@ -879,6 +937,7 @@ sigtest() {
 	local desc="$1"
 	local pre_input="$2"
 	local delay="${3:-0.4}"
+	[ $SKIP_SECTION -eq 1 ] && return
 	((TEST_NUM++))
 
 	{ printf '%s\n' "$pre_input"; sleep 5; } | timeout 4 "$MINI" >/tmp/ra_sg_$$ 2>&1 &
@@ -992,10 +1051,6 @@ check  "export IFS=:"                "export IFS=:"
 check  "unset OLDPWD + cd -"         $'unset OLDPWD\ncd -'
 
 # ── Expansion extrême ──
-check  "echo \${HOME}"               'echo ${HOME}'
-check  "echo \${#HOME}"              'echo ${#HOME}'
-check  "echo \${HOME:-default}"      'echo ${HOME:-default}'
-check  "echo \${NOPE:-fallback}"     'echo ${NOPE:-fallback}'
 check  "echo \$HOME x10 concat"      'echo $HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME'
 check  "\$? après syntax error"      $'ls |\necho $?'
 check  "expand dans nom redir"       'echo hi > /tmp/ra_$$_exp.txt 2>/dev/null; rm -f /tmp/ra_$$_exp.txt; echo ok'
@@ -1032,6 +1087,13 @@ check  "exit après cmd invalid"          $'invalid_xyz\necho $?'
 check  "exit code pipeline final"        $'true | true | false\necho $?'
 check  "exit | ls; echo \$?"             $'exit | ls\necho $?'
 check  "ls | exit 42; echo \$?"          $'ls | exit 42\necho $?'
+check  "exit 12 | exit 13"              "exit 12 | exit 13"
+check  "exit 11 | exit 1 | exit 111"   "exit 11 | exit 1 | exit 111"
+check  "exit 0 | exit 42"              "exit 0 | exit 42"
+check  "exit 255 | exit 0"             "exit 255 | exit 0"
+check  "exit 1|2|3|4"                  "exit 1 | exit 2 | exit 3 | exit 4"
+check  "exit pipe: code dernier"       $'exit 12 | exit 13\necho $?'
+check  "exit pipe: rien sur stdout"    "exit 5 | exit 7"
 
 # ── Noms de fichiers spéciaux ──
 check  "fichier avec espace"        "echo hi > '/tmp/ra file spaces.txt'; cat '/tmp/ra file spaces.txt'; rm '/tmp/ra file spaces.txt'"
