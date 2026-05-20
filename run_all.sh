@@ -155,7 +155,7 @@ else
 fi
 
 normalize() {
-	sed 's/^bash: line [0-9]*: //' | sed 's/^minishell: //'
+	sed 's/^bash: line [0-9]*: //' | sed "s/^$(basename "$MINI"): //"
 }
 
 # Retourne 0-100 : % de mots de $1 présents dans $2
