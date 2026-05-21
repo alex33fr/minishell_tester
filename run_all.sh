@@ -21,7 +21,7 @@ LOGFILE="./logs_full_test.txt"
 echo "================================================================"
 echo "  Compilation (make re)..."
 echo "================================================================"
-if ! make re 2>&1; then
+if ! make -C .. re 2>&1; then
 	echo ""
 	echo "================================================================"
 	echo "  ERROR — make re a échoué, tests annulés"
@@ -30,13 +30,16 @@ if ! make re 2>&1; then
 fi
 echo ""
 
-MINI="${MINI_BIN:-./minishell}"
+MINI="${MINI_BIN:-../minishell}"
 if [ ! -x "$MINI" ]; then
 	echo "================================================================"
 	echo "  ERROR — binaire introuvable après compilation : $MINI"
 	echo "================================================================"
 	exit 1
 fi
+
+# Détecte le prompt dynamiquement (1ère ligne affichée sur stdout avec stdin vide)
+_MINI_PROMPT=$(printf '' | timeout 2 "$MINI" 2>/dev/null | head -1 | tr -d '\n')
 
 # Crée readline.supp si absent
 if [ ! -f ./readline.supp ]; then
@@ -89,7 +92,7 @@ fi
 
 VG="valgrind --leak-check=full --show-leak-kinds=all --track-fds=yes \
     --track-origins=yes --suppressions=$PWD/readline.supp \
-    --trace-children=yes --error-exitcode=99 -q"
+    --error-exitcode=99 -q"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -156,6 +159,11 @@ fi
 
 normalize() {
 	sed 's/^bash: line [0-9]*: //' | sed "s/^$(basename "$MINI"): //"
+}
+
+strip_prompt() {
+	[ -z "$_MINI_PROMPT" ] && cat && return
+	grep -vF "$_MINI_PROMPT"
 }
 
 # Retourne 0-100 : % de mots de $1 présents dans $2
@@ -242,6 +250,7 @@ check() {
 	mini_out=$(printf '%s' "$input" | timeout 5 "$MINI" 2>/tmp/ra_mini_err_$$)
 	mini_exit=$?
 	mini_err=$(cat /tmp/ra_mini_err_$$ | normalize)
+	mini_out=$(printf '%s' "$mini_out" | strip_prompt)
 
 	bash_out=$(printf '%s' "$input" | timeout 5 bash --norc --noprofile 2>/tmp/ra_bash_err_$$)
 	bash_exit=$?
@@ -326,6 +335,7 @@ check_ei() {
 	mini_out=$(printf '%s' "$input" | timeout 5 env -i "$MINI" 2>/tmp/ra_mini_err_$$)
 	mini_exit=$?
 	mini_err=$(cat /tmp/ra_mini_err_$$ | normalize)
+	mini_out=$(printf '%s' "$mini_out" | strip_prompt)
 
 	bash_out=$(printf '%s' "$input" | timeout 5 env -i bash --norc --noprofile 2>/tmp/ra_bash_err_$$)
 	bash_exit=$?
