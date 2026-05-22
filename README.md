@@ -31,7 +31,7 @@ Automated test suite for minishell projects. Compares your shell against bash on
 
 | Syntax | Effect |
 |--------|--------|
-| *(none)* | Run all 22 sections |
+| *(none)* | Run all 34 sections |
 | `N` | Run only section N |
 | `N-M` | Run sections N through M (inclusive) |
 
@@ -57,6 +57,7 @@ Flags are **fully combinable** in any order:
 ./run_all.sh -e 5-7          # only FAILs in sections 5 to 7
 ./run_all.sh 5-7 -cl         # CRASHes + LEAKs in sections 5 to 7
 ./run_all.sh -e 8 -l         # FAILs + LEAKs in section 8
+./run_all.sh 22-34           # run only the extended sections
 ```
 
 ### Binary override
@@ -130,17 +131,29 @@ grep CRASH logs_full_test.txt
 | 9 | BUILTINS — unset | No args, invalid names, unset HOME / PATH |
 | 10 | BUILTINS — exit | Non-numeric, overflow, leading zeros, `+`/`-` signs, quotes, too many args |
 | 11 | BUILTINS — env / pwd | Basic output, extra arguments |
-| 12 | COMMANDES INTROUVABLES | Exit 127 not found, exit 126 no permission, relative and absolute paths |
+| 12 | COMMANDES INTROUVABLES / PERMISSIONS | Exit 127 not found, exit 126 no permission, relative and absolute paths |
 | 13 | SANS PATH / ENV VIDE | Commands run with stripped PATH or completely empty environment |
 | 14 | EDGE CASES | Empty input, only spaces, very long args, 300 args, `$?` in pipes |
 | 15 | TESTS REPOS ETUDIANTS | Crash baits from student repos: operator hell, quote madness, exit overflow, export abuse, heredoc extremes, syntax errors |
 | 16 | FILESYSTEM | `cd` into a directory deleted underneath; file created then removed mid-session |
 | 17 | SIGNAUX | `SIGINT (^C)` during blocking commands, heredoc, long pipes; `$?` after pipelines with invalid commands |
-| 18 | TESTS DES MALADES | 100-pipe chains, `yes | head`, parsing edge cases, 500-line heredoc, mass export/unset, `exit` in pipelines, file descriptor leaks |
-| 19 | HEREDOC EXTREMES | Unusual delimiters, quoted delimiters, 1000-line bodies, multiple sequential heredocs, heredoc + SIGINT |
+| 18 | TESTS DES MALADES | `$$` / `;` / `&`, echo `-e`/`-E`, 100-pipe chains, `yes \| head`, parsing edge cases, 500-line heredoc, mass export/unset, `exit` in pipelines, file descriptor leaks |
+| 19 | HEREDOC — TESTS EXTRÊMES | Empty/whitespace-only delimiter, quoted delimiters, 1000-line bodies, multiple sequential heredocs, heredoc + SIGINT |
 | 20 | PATH POISONNING | Fake binaries in PATH that shadow builtins; builtins must not be overridden; SIGINT on blocking fake binary |
 | 21 | ENV -I | All tests run with `env -i` (fully empty environment); PWD/OLDPWD management, `cd -`, `export`, pipes, heredoc |
-| 22 | COMPLEMENTS | Single-char commands, echo `-n` variants, variable terminators, exit with quotes, pipe + echo stdin, redirection before command name |
+| 22 | COMPLÉMENTS DOCUMENT 800 | `$9VAR` positional param + literal, `$$` PID width, echo `-n` variants, redirection before command name |
+| 23 | SYNTAX ERRORS | Invalid pipe/redirect sequences: `\| \|`, `\| \| \|`, trailing `\|`, trailing `>`, `>>` with no file |
+| 24 | ECHO — CAS AVANCÉS | Adjacent quotes in argument (`hello'world'`), empty double-quotes (`hello""world`), multiple `-n` flags |
+| 25 | VARIABLES — CAS AVANCÉS | Empty var followed by text, `$?` immediately after command, `$$` PID via pipe and `wc -c` |
+| 26 | QUOTES — COMBINAISONS AVANCÉES | Command split across quotes (`prin"tf"`), `$VAR` in double quotes, nested expansions |
+| 27 | EXPORT / UNSET — EDGE CASES | Export then env grep, export+unset leaves no trace, `export VAR` without value |
+| 28 | EXIT — EDGE CASES | `exit 123`, `exit 256` wraps to 0, non-numeric arg, too many args exit code |
+| 29 | HEREDOC — EDGE CASES | Redirection before command (`<< end cat -e`), multi-line body |
+| 30 | PWD — EDGE CASES | `pwd` alone, `pwd \| cat -e`, `cd /tmp; pwd; cd -; pwd` round-trip |
+| 31 | REDIRECTIONS — AVANCÉES | Stdin from file piped to filter (`< /etc/hostname cat \| md5sum`), non-existent file + pipe |
+| 32 | COMMANDES DIVERSES | `$PWD` as command, empty-var as command, `true`/`false` exit codes |
+| 33 | ENV — FILTRAGE ET UNSET | `env \| grep USER/HOME`, unset then env grep, export visible in env |
+| 34 | EXTRA PIPE CHAINS | 6-stage pipe (`ls\|ls\|…\|cat -e`), pipes with no spaces, pipe + exit code propagation |
 
 ---
 
@@ -208,6 +221,7 @@ After each run the script removes:
 # Check memory only
 ./run_all.sh -l          # all leaks
 ./run_all.sh 1-5 -l      # leaks in pipes, redirections, heredoc, quotes, variables
+./run_all.sh 18-21 -e    # failures in edge-case / env-i sections
 
 # Full log review after a run
 grep -A5 "FAIL" logs_full_test.txt
