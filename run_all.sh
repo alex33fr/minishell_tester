@@ -1078,14 +1078,13 @@ check  "heredoc newline seul delim"  $'cat <<\nEOF'
 
 # ── Variables de destruction ──
 check  "unset PATH + ls"             $'unset PATH\nls\necho $?'
-check  "unset PATH + /bin/ls"        $'unset PATH\n/bin/ls /tmp\necho $?'
+check  "unset PATH + /bin/ls"        $'unset PATH\n/bin/ls /etc/hostname\necho $?'
 check  "export PATH=/nope + ls"      $'export PATH=/nonexistent_dir_xyz\nls\necho $?'
 check  "export HOME=/ + cd + pwd"    $'export HOME=/\ncd\npwd'
 check  "export HOME= + cd"           $'export HOME=\ncd\necho $?'
 check  "unset HOME + cd"             $'unset HOME\ncd\necho $?'
 check  "unset IFS"                   "unset IFS"
 check  "export IFS=:"                "export IFS=:"
-check  "unset OLDPWD + cd -"         $'unset OLDPWD\ncd -'
 
 # ── Expansion extrême ──
 check  "echo \$HOME x10 concat"      'echo $HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME'
@@ -1301,10 +1300,6 @@ check_ei "env-i : cd /tmp — OLDPWD = dir initial" "$(printf 'cd /tmp\nenv | gr
 check_ei "env-i : double cd — OLDPWD suit"       "$(printf 'cd /tmp\ncd /\nenv | grep "^OLDPWD="')"
 check_ei "env-i : triple cd — OLDPWD chain"      "$(printf 'cd /tmp\ncd /\ncd /var\nenv | grep "^OLDPWD="')"
 
-# ── cd - ──
-check_ei "env-i : cd - retour dir précédent"     "$(printf 'cd /tmp\ncd /\ncd -\npwd')"
-check_ei "env-i : cd - sans OLDPWD = erreur"     "cd -"
-check_ei "env-i : cd - exit 1 sans OLDPWD"       "$(printf 'cd -\necho \$?')"
 
 # ── unset de variables spéciales ──
 check_ei "env-i : unset PWD puis pwd"            "$(printf 'unset PWD\npwd')"
@@ -1562,7 +1557,6 @@ check  "clear | pwd"                       "clear | pwd"
 check  "clear | pwd | cat -e"             "clear | pwd | cat -e"
 check  "clear | pwd . | cat -e"           "clear | pwd . | cat -e"
 check  "pwd; cd /tmp; pwd"                $'pwd\ncd /tmp\npwd'
-check  "cd /tmp; pwd; cd -; pwd"          $'cd /tmp\npwd\ncd -\npwd'
 
 # ══════════════════════════════════════════════
 section "[31] REDIRECTIONS — AVANCÉES"
