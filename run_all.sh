@@ -1277,9 +1277,11 @@ section "[21] ENV -I — ENVIRONNEMENT VIDE"
 
 # ── Variables systèmes à la racine ──
 check_ei "env-i : PATH absent de env"            "env | grep -c '^PATH='"
+check_ei "env-i : PATH absent de export"         "export | grep -c '^declare -x PATH='"
 check_ei "env-i : OLDPWD absent de env"          "env | grep -c '^OLDPWD='"
 check_ei "env-i : PWD présent dans env"          "env | grep -c '^PWD='"
 check_ei "env-i : PWD = répertoire courant"      "env | grep '^PWD='"
+check_ei "env-i : commande trouvée sans PATH"    "echo hello | cat"
 
 # ── Commandes de base fonctionnent ──
 check_ei "env-i : echo hello"                    "echo hello"
@@ -1299,6 +1301,7 @@ check_ei "env-i : cd /tmp — OLDPWD apparaît"     "$(printf 'cd /tmp\nenv | gr
 check_ei "env-i : cd /tmp — OLDPWD = dir initial" "$(printf 'cd /tmp\nenv | grep "^OLDPWD="')"
 check_ei "env-i : double cd — OLDPWD suit"       "$(printf 'cd /tmp\ncd /\nenv | grep "^OLDPWD="')"
 check_ei "env-i : triple cd — OLDPWD chain"      "$(printf 'cd /tmp\ncd /\ncd /var\nenv | grep "^OLDPWD="')"
+check_ei "env-i : OLDPWD absent avant cd"        "env | grep -c '^OLDPWD='"
 
 
 # ── unset de variables spéciales ──
