@@ -38,8 +38,26 @@ if [ ! -x "$MINI" ]; then
 	exit 1
 fi
 
-# Détecte le prompt dynamiquement (1ère ligne affichée sur stdout avec stdin vide)
-_MINI_PROMPT=$(printf '' | timeout 2 "$MINI" 2>/dev/null | head -1 | tr -d '\n')
+# Compile fake_readline.so pour intercepter readline() et imposer un prompt fixe "MINIT: "
+# Sans ça, le prompt du minishell pollue stdout et les tests échouent tous.
+_TDIR="$(cd "$(dirname "$0")" && pwd)"
+_FAKE_RL="${_TDIR}/fake_readline.so"
+if [ ! -f "$_FAKE_RL" ]; then
+	if gcc -shared -fPIC -o "$_FAKE_RL" "${_TDIR}/fake_readline.c" -ldl 2>/dev/null; then
+		echo "[INFO] fake_readline.so compilé avec succès"
+	else
+		echo "[WARN] fake_readline.so compilation échouée — détection dynamique du prompt"
+		_FAKE_RL=""
+	fi
+fi
+if [ -n "$_FAKE_RL" ] && [ -f "$_FAKE_RL" ]; then
+	export LD_PRELOAD="$_FAKE_RL"
+	_MINI_PROMPT="MINIT: "
+else
+	# Fallback : le prompt se termine par "exit" (via printf("exit\n") sur EOF)
+	_raw=$(printf '' | timeout 2 "$MINI" 2>/dev/null)
+	_MINI_PROMPT="${_raw%exit}"
+fi
 
 # Crée readline.supp si absent
 if [ ! -f ./readline.supp ]; then
@@ -147,11 +165,11 @@ if [ $SHOW_E -eq 0 ] && [ $SHOW_C -eq 0 ] && [ $SHOW_L -eq 0 ] && [ $SHOW_W -eq 
 	SHOW_E=1; SHOW_C=1; SHOW_L=1; SHOW_W=1
 fi
 
-if [ "$SEC_FROM" -eq 1 ] && [ "$SEC_TO" -ge 22 ]; then
+if [ "$SEC_FROM" -eq 1 ] && [ "$SEC_TO" -ge 34 ]; then
 	TOTAL_TESTS=$(grep -cE '^\s*(check|check_ei|vcheck|sigtest)\s+"' "$0")
 else
 	TOTAL_TESTS=$(awk -v from="$SEC_FROM" -v to="$SEC_TO" '
-		/section[[:space:]].*\[[0-9]+\]/ { match($0,/\[([0-9]+)\]/,m); cur=m[1]+0 }
+		/section[[:space:]].*\[[0-9]+\]/ { s=$0; sub(/.*\[/,"",s); sub(/\].*/,"",s); cur=s+0 }
 		/^[[:space:]]*(check|check_ei|vcheck|sigtest)[[:space:]]+"/ { if(cur>=from&&cur<=to) c++ }
 		END { print c+0 }
 	' "$0")
@@ -163,7 +181,10 @@ normalize() {
 
 strip_prompt() {
 	[ -z "$_MINI_PROMPT" ] && cat && return
-	grep -vF "$_MINI_PROMPT"
+	# Supprime toutes les occurrences du prompt + la ligne de commande echo'd.
+	# perl -0777 slurpe l'entrée entière pour gérer le cas où le prompt apparaît
+	# en milieu de ligne (ex: "hiMINIT: next_cmd\n" quand printf n'ajoute pas de \n).
+	perl -0777 -pe 's/\Q'"$_MINI_PROMPT"'\E[^\n]*\n?//g'
 }
 
 # Retourne 0-100 : % de mots de $1 présents dans $2
@@ -332,7 +353,11 @@ check_ei() {
 	[ $SKIP_SECTION -eq 1 ] && return
 	((TEST_NUM++))
 
-	mini_out=$(printf '%s' "$input" | timeout 5 env -i "$MINI" 2>/tmp/ra_mini_err_$$)
+	if [ -n "$_FAKE_RL" ]; then
+		mini_out=$(printf '%s' "$input" | timeout 5 env -i LD_PRELOAD="$_FAKE_RL" "$MINI" 2>/tmp/ra_mini_err_$$)
+	else
+		mini_out=$(printf '%s' "$input" | timeout 5 env -i "$MINI" 2>/tmp/ra_mini_err_$$)
+	fi
 	mini_exit=$?
 	mini_err=$(cat /tmp/ra_mini_err_$$ | normalize)
 	mini_out=$(printf '%s' "$mini_out" | strip_prompt)
@@ -396,12 +421,14 @@ vcheck() {
 	[ $SKIP_SECTION -eq 1 ] && return
 	((TEST_NUM++))
 
+	_vld=""; [ -n "$_FAKE_RL" ] && _vld="LD_PRELOAD=$_FAKE_RL"
 	if [ -n "$env_prefix" ]; then
-		mini_out=$(printf '%s' "$input" | timeout 5 env -i $env_prefix "$MINI" 2>/tmp/ra_mini_err_$$)
+		mini_out=$(printf '%s' "$input" | timeout 5 env -i $_vld $env_prefix "$MINI" 2>/tmp/ra_mini_err_$$)
 	else
 		mini_out=$(printf '%s' "$input" | timeout 5 "$MINI" 2>/tmp/ra_mini_err_$$)
 	fi
 	mini_exit=$?
+	mini_out=$(printf '%s' "$mini_out" | strip_prompt)
 	rm -f /tmp/ra_mini_err_$$
 
 	if [ $mini_exit -eq 124 ]; then
@@ -428,7 +455,7 @@ vcheck() {
 	fi
 
 	if [ -n "$env_prefix" ]; then
-		vg_out=$(printf '%s' "$input" | timeout 10 env -i $env_prefix $VG "$MINI" 2>/tmp/ra_vg_$$)
+		vg_out=$(printf '%s' "$input" | timeout 10 env -i $_vld $env_prefix $VG "$MINI" 2>/tmp/ra_vg_$$)
 	else
 		vg_out=$(printf '%s' "$input" | timeout 10 $VG "$MINI" 2>/tmp/ra_vg_$$)
 	fi
@@ -487,8 +514,8 @@ section() {
 
 # Supprime les artefacts connus d'un run précédent avant le snapshot
 find . -maxdepth 1 -type f ! -name "*.c" ! -name "*.h" ! -name "*.sh" \
-	! -name "*.supp" ! -name "*.txt" ! -name "*.md" ! -name "Makefile" \
-	! -name "minishell" ! -name ".gitignore" -delete 2>/dev/null
+	! -name "*.so" ! -name "*.supp" ! -name "*.txt" ! -name "*.md" \
+	! -name "Makefile" ! -name "minishell" ! -name ".gitignore" -delete 2>/dev/null
 
 # Snapshot des fichiers présents avant les tests
 _BEFORE_FILES=$(ls -1 . 2>/dev/null | sort)
@@ -1346,6 +1373,287 @@ check  "unset \"\" VAR — var disparaît"      $'export _RA_UST2=x\nunset "" _R
 # ── Export — espace autour du signe = ──
 check  "export VAR =val (espace avant =)"    $'export _RA_SP1 =bonjour\necho $?'
 check  "export VAR= val (espace après =)"    $'export _RA_SP2= bonjour\necho $?'
+
+# ══════════════════════════════════════════════
+section "[23] SYNTAX ERRORS — PIPE ET REDIRECT INVALIDES"
+# ══════════════════════════════════════════════
+check  "| | double pipe vide"                "| |"
+check  "| | | triple pipe vide"              "| | |"
+check  "| \$"                                "| \$"
+check  ">>> triple chevron"                  ">>>"
+check  "cat    <| ls"                        "cat    <| ls"
+check  "echo hi | >"                         "echo hi | >"
+check  "echo hi | > >>"                      "echo hi | > >>"
+check  "echo hi | < |"                       "echo hi | < |"
+check  "echo hi |   |"                       "echo hi |   |"
+check  "printf | | ls (syntax)"              "printf 'Err!' | | ls"
+check  "printf < | ls (syntax)"             "printf 'Err!' < | ls"
+check  "printf >> | ls (syntax)"            "printf 'Err!'  >> | ls"
+check  "printf | > file (syntax)"           "printf 'Err!' | > /dev/null"
+check  "printf |> file (syntax)"            "printf 'Err!' |> /dev/null"
+check  ">x cmd | (syntax)"                  "> /dev/null printf 'Err!' |"
+check  "| >x cmd (syntax)"                  "| > /dev/null printf 'Err!'"
+check  ">x cmd > (syntax)"                  "> /dev/null printf 'Err!' >"
+check  ">x cmd << (syntax)"                 "> /dev/null printf 'Err!' <<"
+check  "echo '>' test '<'"                  "echo '>' test '<'"
+check  "echo '>>'"                          "echo '>>'"
+check  "echo '<<'"                          "echo '<<'"
+check  "echo '>test<'"                      "echo '>test<'"
+check  "echo '>test'"                       "echo '>test'"
+check  "echo 'test<'"                       "echo 'test<'"
+check  "echo \">\""                         'echo ">"'
+check  "echo \"<\""                         'echo "<"'
+check  "echo \">test<\""                    'echo ">test<"'
+
+# ══════════════════════════════════════════════
+section "[24] ECHO — CAS AVANCÉS"
+# ══════════════════════════════════════════════
+check  "echo hello'world' (adjacent)"       "echo hello'world'"
+check  "echo hello\"\"world (adj dquote)"   'echo hello""world'
+check  "echo ''b (empty+word)"              "echo ''b"
+check  "echo '' b (space)"                  "echo '' b"
+check  "echo '' ''x"                        "echo '' ''x"
+check  "echo -n \$USER -n hello"            'echo -n $USER -n hello'
+check  "echo test -n (flag last)"           "echo test -n"
+check  "echo -nns -n test"                  "echo -nnnnnnnnnnnnnn -nns -n test"
+check  "echo -nnn -n test"                  "echo -nnnnnnnnnnnnnn -nnn -n test"
+check  "echo -nnnnnnnnnnnnnn1"              "echo -nnnnnnnnnnnnnn1 salut"
+check  "echo -n multiple args"              "echo -n a b c d e"
+check  "echo -n -n -n hello"               "echo -n -n -n hello"
+check  "echo str1 empty str3"              'echo str1  "" str3'
+check  "echo Ichi Ni San | cat -e"         "echo Ichi Ni San Yon Go | cat -e"
+check  "echo '|' test"                     "echo '|' test"
+check  "echo '>test '"                     "echo '>test '"
+check  "echo ' test <'"                    "echo ' test <'"
+check  "echo '> >> < * ? | ; <<'"         "echo '> >> < * ? | ; [ ] || && ( }) & # \$ \ <<'"
+check  "echo \"exit_code->\$? user->\$USER\"" 'echo "exit_code ->$? user ->$USER"'
+check  "echo --n (not a flag)"              "echo --n"
+
+# ══════════════════════════════════════════════
+section "[25] VARIABLES — CAS AVANCÉS"
+# ══════════════════════════════════════════════
+check  "echo \$EMPYT (var vide)"            "echo \$EMPYT"
+check  "echo \$EMPYT    abc"               "echo \$EMPYT    abc"
+check  "echo \$EMPYT abc"                  "echo \$EMPYT abc"
+check  "echo \$EMPYT abc \$EMPTY"           "echo \$EMPYT abc \$EMPTY"
+check  "\$EMPTY echo \$EMPYT abc"           "\$EMPTY echo \$EMPYT abc"
+check  "echo \$USER_\$USER"                "echo \$USER_\$USER"
+check  "printf \"\$USER\\n\""              'printf "$USER\n"'
+check  "printf \$?"                        "printf \$?"
+check  "printf \$??"                       "printf \$??"
+check  "printf \$??? \$?? \$?"             "printf \$??? \$?? \$?"
+check  "echo \$?HELLO"                     "echo \$?HELLO"
+check  "echo \$ USER (dollar space)"       "echo \$ USER"
+check  "echo \$USER\$ (trail dollar)"      "echo \$USER\$"
+check  "echo \"\$USER\$\""                 'echo "$USER$"'
+check  "echo \"\$USER \$\""               'echo "$USER $"'
+check  "echo \$JENEXISTEPAS"               "echo \$JENEXISTEPAS"
+check  "echo \$ JENEXISTEPAS"              "echo \$ JENEXISTEPAS"
+check  "expr \$?+\$? chain"               $'true\nexpr $? + $?\nexpr $? + $?'
+check  "echo \$USER\$USER (concat)"        "echo \$USER\$USER"
+check  "echo \$USER multiple"              "echo \$USER \$USER \$USER \$USER \$USER"
+check  "printf \"\$USER\$USER\""           'printf "$USER$USER"'
+check  "echo '\$HOME' single no expand"    "echo '\$HOME'"
+check  "echo \$\$ pid | wc -c"             "echo \$\$ | wc -c"
+check  "echo \$\$\$\$\$\$... | wc -l"     "echo \$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$\$ | wc -l"
+check  "echo \$ seul"                      "echo \$"
+
+# ══════════════════════════════════════════════
+section "[26] QUOTES — COMBINAISONS AVANCÉES"
+# ══════════════════════════════════════════════
+check  "prin\"tf\" \$USER (split cmd)"     'prin"tf" $USER'
+check  "\"printf\" \$USER"                '"printf" $USER'
+check  "pri\"tf \$USER\" (quote mid)"      'pri"tf $USER"'
+check  "printf \$\"hello\" (dollar-dquote)" 'printf $"hello"'
+check  "echo\$USER (no space)"             "echo\$USER"
+check  "echo '' \"\"  (both empty)"        'echo '"'"''"'"' ""'
+check  "echo '\$?' single"                 "echo '\$?'"
+check  "echo ''\$USER'' (adj)"             "echo ''\$USER''"
+check  "echo '''\$USER''' (3 quotes)"      "echo '''\$USER'''"
+check  "echo \"\$\" dquote dollar"         'echo "$"'
+check  "echo '\$' squote dollar"           "echo '\$'"
+check  "echo alt quotes a\"b\"c\"d\""      "echo 'a'\"b\"'c'\"d\""
+check  "echo \" \" (space only)"           'echo " "'
+check  "echo \"    \" (spaces)"            'echo "    "'
+check  "echo \"        \" (many spaces)"   'echo "        "'
+check  "echo '    ' (squote spaces)"       "echo '    '"
+check  "echo '        ' (squote 8sp)"      "echo '        '"
+check  "echo \"\$PWD\" expand"             'echo "$PWD"'
+check  "printf \"\$USER\$USER''\""         "printf \"\$USER\$USER'' = ' \$L ANG '\""
+check  "echo seul"                         "echo"
+
+# ══════════════════════════════════════════════
+section "[27] EXPORT / UNSET — EDGE CASES"
+# ══════════════════════════════════════════════
+check  "export ABC puis env grep"          $'export ABC\nenv | grep "^ABC" | head -1'
+check  "export+unset no print"             $'export NDACUNH=42\nunset NDACUNH\nprintf ":%s" "$NDACUNH"'
+check  "export hello (no val)"             "export hello"
+check  "export A- (invalid name)"          "export A-"
+check  "export HELLO=123 A (mixed)"        "export HELLO=123 A"
+check  "export HELLO=\"123 A-\""           'export HELLO="123 A-"'
+check  "export hello world"               "export hello world"
+check  "export HELLO-=123 (invalid)"       "export HELLO-=123"
+check  "export = (invalid)"               "export ="
+check  "export 123 (invalid)"             "export 123"
+check  "export SLS='/bin/ls'"             $"export SLS='/bin/ls'\n/bin/ls /tmp | head -1"
+check  "export TRES pipe env grep"         "export UNO=1 DOS-2 TRES=3 | env | grep TRES"
+check  "export ABCD +=val (space)"         $'export ABCD=abcd\nexport ABCD +=ndacunh\nenv | grep "^ABCD"'
+check  "export ABCD+= ndacunh"             $'export ABCD=abcd\nexport ABCD+= ndacunh\nenv | grep "^ABCD"'
+check  "export ABCD =abcd (space=)"        $'export ABCD =abcd\nenv | grep "^ABCD"'
+check  "export ABCD= abcd (=space)"        $'export ABCD= abcd\nenv | grep "^ABCD"'
+check  "export ABCD=Hello; ABCD =x"        $'export ABCD=Hello\nexport ABCD =abcd\nenv | grep "^ABCD"'
+check  "export ABCD=Hello; ABCD= x"        $'export ABCD=Hello\nexport ABCD= abcd\nenv | grep "^ABCD"'
+check  "unset HELLO= (invalid)"            "unset HELLO="
+check  "unset (no args)"                   "unset"
+check  "unset HELLO1 HELLO2 multi"         "unset HELLO1 HELLO2"
+check  "unset HOME; echo \$HOME"           $'unset HOME\necho $HOME'
+check  "export A=supra; unset A"           $'export A=suprapack\necho a $A\nunset A\necho a $A'
+check  "export HELLO=abc; unset HELLO"     $'export HELLO=abc\nunset HELLO'
+check  "export HELL HELLOO no match"       $'export HELLO=abc\nunset HELL\nunset HELLOO\nprintf ":%s" "$HELLO"'
+
+# ══════════════════════════════════════════════
+section "[28] EXIT — EDGE CASES"
+# ══════════════════════════════════════════════
+check  "exit 123"                          "exit 123"
+check  "exit 256 (wrap 0)"                "exit 256"
+check  "exit +100 (signed plus)"          "exit +100"
+check  "exit -100 (negative)"             "exit -100"
+check  "exit hello (non-num)"             "exit hello"
+check  "exit 42 world (too many args)"    "exit 42 world"
+check  "exit 13 | exit 14 (dans pipe)"    "exit 13 | exit 14"
+check  "exit MAX_INT64"                   "exit 9223372036854775807"
+check  "exit MAX_INT64+1 (overflow)"      "exit 9223372036854775808"
+check  "exit -MAX_INT64"                  "exit -9223372036854775807"
+check  "exit -MAX_INT64-1"               "exit -9223372036854775808"
+check  "exit -MAX_INT64-2 (underflow)"   "exit -9223372036854775809"
+check  "exit \"+100\" (quoted)"           'exit "+100"'
+check  "exit +\"100\" (mixed quote)"      'exit +"100"'
+check  "exit \"-100\" (quoted neg)"       'exit "-100"'
+check  "exit -\"100\" (dash+quote)"       'exit -"100"'
+
+# ══════════════════════════════════════════════
+section "[29] HEREDOC — EDGE CASES"
+# ══════════════════════════════════════════════
+vcheck "heredoc cat -e simple"             $'<< end cat -e\nsimple\ntest\nend'
+vcheck "heredoc AH content"               $'<< AH cat -e\nsimple\ntest\nend\nAH'
+vcheck "heredoc lignes vides"             $'<< AH cat -e\nsimple\n\n\n\nend\nAH'
+vcheck "heredoc pipe | grep"              $'<< AH cat -e | grep -o simple\nsimple\nend\nAH'
+vcheck "heredoc \"EOF\" expand \$USER"    $'<< "EOF" cat -e\n$USER\nEOF'
+vcheck "heredoc 'EOF' no expand \$USER"   $'<< '"'"'EOF'"'"' cat -e\n$USER\nEOF'
+vcheck "heredoc \"EOF\" no expand txt"    $'<< "EOF" cat -e\nnda-cuhn\nEOF'
+vcheck "heredoc 'EOF' literal txt"        $'<< '"'"'EOF'"'"' cat -e\nnda-cuhn\nEOF'
+vcheck "cat << here -e (flags après)"     $'cat << here -e\nhello\nhere'
+vcheck "heredoc + newline après end"       $'<< end cat -e\nsimple\ntest\nend\n'
+vcheck "heredoc AH + newline"             $'<< AH cat -e\nsimple\ntest\nend\nAH\n'
+vcheck "heredoc expand dquote + newline"  $'<< "EOF" cat -e\n$USER\nEOF\n'
+vcheck "heredoc no expand squote + nl"    $'<< '"'"'EOF'"'"' cat -e\n$USER\nEOF\n'
+check  "<<EOF sans commande"              $'<<EOF\nhello\nEOF'
+vcheck "cat<<EOF sans espace"             $'cat<<EOF\nhello world\nEOF'
+
+# ══════════════════════════════════════════════
+section "[30] PWD — EDGE CASES"
+# ══════════════════════════════════════════════
+check  "pwd seul"                          "pwd"
+check  "pwd | cat -e"                      "pwd | cat -e"
+check  "pwd . (arg point)"                 "pwd ."
+check  "pwd .. (arg double point)"         "pwd .."
+check  "printf a | pwd | cat -e"           "printf a | pwd | cat -e"
+check  "clear | pwd"                       "clear | pwd"
+check  "clear | pwd | cat -e"             "clear | pwd | cat -e"
+check  "clear | pwd . | cat -e"           "clear | pwd . | cat -e"
+check  "pwd; cd /tmp; pwd"                $'pwd\ncd /tmp\npwd'
+check  "cd /tmp; pwd; cd -; pwd"          $'cd /tmp\npwd\ncd -\npwd'
+
+# ══════════════════════════════════════════════
+section "[31] REDIRECTIONS — AVANCÉES"
+# ══════════════════════════════════════════════
+check  "< /etc/hostname cat | md5sum"      "< /etc/hostname cat | md5sum"
+check  "< nonexist cat | wc -c"           "< /nonexistent_xyz_ra31 cat | wc -c"
+check  "< /etc/hostname | printf msg"      "< /etc/hostname | printf 'visible?'"
+check  "< /dev/urandom head | wc -c"      "< /dev/urandom head -c 15 | wc -c"
+check  "printf >/dev/null | cat -e"        "printf 'hello world' >/dev/null | cat -e"
+check  ">/dev/null printf | cat -e"        ">/dev/null printf 'hello world' | cat -e"
+check  ">/dev/stdout printf | cat -e"      ">/dev/stdout printf 'hello world' | cat -e"
+check  "> /dev/stdout seul"               "> /dev/stdout"
+check  ">> /dev/stdout seul"              ">> /dev/stdout"
+check  "< /dev/stdout seul"               "< /dev/stdout"
+check  "< /etc/hostname < /etc/os-release wc" "wc -w < /etc/hostname < /etc/os-release"
+check  "ls | wc -w < /etc/hostname"       "ls | wc -w < /etc/hostname"
+vcheck "printf append multi"              $'printf hello > /tmp/ra_a31.txt\nprintf world >> /tmp/ra_a31.txt\ncat /tmp/ra_a31.txt\nrm -f /tmp/ra_a31.txt'
+check  "> file echo (redir avant cmd)"    $'> /tmp/ra_pre31.txt echo hola\ncat /tmp/ra_pre31.txt\nrm -f /tmp/ra_pre31.txt'
+check  ">> file echo (append avant cmd)"  $'>> /tmp/ra_app31.txt echo world\ncat /tmp/ra_app31.txt\nrm -f /tmp/ra_app31.txt'
+check  "cmd_not_found | wc -c"            "cmd_not_found_xyz_ra31 | wc -c"
+check  "cat < nonexist | wc -c"           "cat < /nonexistent_xyz_ra31 | wc -c"
+check  "< Makefile nonexist cmd | wc -c"  "< /etc/hostname cmd_not_found_xyz | wc -c"
+check  "< /etc/hostname | printf voir?"   "< /etc/hostname | printf 'You see me?'"
+check  "< /etc/hostname < /etc/hostname"  "< /etc/hostname < /etc/hostname cat"
+
+# ══════════════════════════════════════════════
+section "[32] COMMANDES DIVERSES"
+# ══════════════════════════════════════════════
+check  "\$PWD (run comme cmd)"             "\$PWD"
+check  "\$EMPTY (empty var comme cmd)"     "\$EMPTY"
+check  "\$EMPTY echo hi"                   "\$EMPTY echo hi"
+check  "edsfdsf; echo error \$?"          $'edsfdsf\necho "error: $?"'
+check  "ls | ls |ls | ls| ls (chain)"     "ls | ls |ls | ls| ls"
+check  "/bin/ls | /usr/bin/cat -e"         "/bin/ls | /usr/bin/cat -e"
+check  ".. | .. | .. (invalid cmds)"       ".. | .. | .."
+check  "command_not_found | echo abc"      "command_not_found | echo 'abc'"
+check  "command_not_found | cat"           "command_not_found | cat"
+check  "true | false (exit code)"          "true | false"
+check  "false | true (exit code)"          "false | true"
+check  "false | false (both fail)"         "false | false"
+check  "/bin/ls -la | head -5"             "/bin/ls -la | head -5"
+check  "/bin/ls -l | wc -l"               "/bin/ls -l | wc -l"
+check  "ls -l | cat -e | head -3"          "ls -l | cat -e | head -3"
+check  "printf '%s' hello world"           "printf '%s' hello world"
+check  "echo \"cat | cat > \$USER\""      'echo "cat Makefile | cat > $USER"'
+check  "echo 'cat | cat > \$USER'"        "echo 'cat Makefile | cat > \$USER'"
+vcheck "cat /dev/urandom | head | wc"      "cat /dev/urandom | head -c 15 | wc -c"
+check  "echo \$?"                          "echo \$?"
+
+# ══════════════════════════════════════════════
+section "[33] ENV — FILTRAGE ET UNSET"
+# ══════════════════════════════════════════════
+check  "env | grep USER"                   "env | grep USER"
+check  "env | grep HOME"                   "env | grep HOME"
+check  "unset 6_a (invalid name)"          "unset 6_a"
+check  "unset ndacunh (inexistant)"        "unset ndacunh"
+check  "unset 0oui (invalid)"              "unset 0oui"
+check  "unset PWD HERE; echo \$PWD"        $'unset PWD HERE\necho $PWD'
+check  "unset PATH; /bin/ls /tmp"          $'unset PATH\n/bin/ls /tmp | head -1'
+check  "unset PATH; ls (pas de PATH)"      $'unset PATH\nls'
+check  "unset HOME; echo \$HOME"           $'unset HOME\necho $HOME'
+check  "export GHOST=123 | env grep"       "export GHOST=123 | env | grep GHOST"
+check  "env | grep -c PATH"                "env | grep -c PATH"
+check  "env | grep USER | wc -l"           "env | grep USER | wc -l"
+check  "export HELL HELLOO no match"       $'export HELLO=abc\nunset HELL\nunset HELLOO\necho $HELLO'
+check  "export+unset: var disparaît"       $'export MYVAR33=hello\nunset MYVAR33\nenv | grep -c "^MYVAR33="'
+check  "export MYVAR33= vide dans env"     $'export MYVAR33=\nenv | grep "^MYVAR33="'
+
+# ══════════════════════════════════════════════
+section "[34] EXTRA PIPE CHAINS ET EDGE CASES"
+# ══════════════════════════════════════════════
+check  "ls|ls|ls|ls|ls|ls|cat -e"          "ls|ls|ls|ls|ls|ls|cat -e"
+check  "echo hello|cat -e (no space)"       "echo hello|cat -e"
+check  "echo hello      |cat -e (spaces)"   "echo hello      |cat -e"
+check  "echo hello|               cat -e"   "echo hello|               cat -e"
+check  "echo hello | cat -e | cat -e"       "echo hello | cat -e | cat -e"
+check  "echo abc | wc -c"                   "echo abc | wc -c"
+check  "echo '' | cat -e"                   "echo '' | cat -e"
+check  "echo '   ' | cat -e"               "echo '   ' | cat -e"
+check  "ls | wc -l | cat"                   "ls | wc -l | cat"
+check  "echo a | echo b | echo c"           "echo a | echo b | echo c"
+check  "cat /etc/hostname | md5sum"          "cat /etc/hostname | md5sum"
+check  "echo hello world | grep hello"       "echo hello world | grep hello"
+check  "echo hello world | grep xyz"         "echo hello world | grep xyz"
+check  "ls | cat | cat | cat | cat | cat"    "ls | cat | cat | cat | cat | cat"
+check  "printf a | pwd | cat -e"             "printf a | pwd | cat -e"
+check  "echo \"\$PWD\""                      'echo "$PWD"'
+check  "echo '\$PWD'"                        "echo '\$PWD'"
+check  "echo \"> >> < * ? | ; <<\" (dquote)" 'echo "> >> < * ? | ; [ ] || && ( }) & # $ \ <<"'
+check  "ls|ls|ls|ls|ls|ls|ls|ls|ls|ls"      "ls|ls|ls|ls|ls|ls|ls|ls|ls|ls"
+check  "echo \$USER | wc -c"                "echo \$USER | wc -c"
 
 # ══════════════════════════════════════════════
 printf "\n"
