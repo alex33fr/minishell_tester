@@ -1089,17 +1089,17 @@ check  "export IFS=:"                "export IFS=:"
 # ── Expansion extrême ──
 check  "echo \$HOME x10 concat"      'echo $HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME$HOME'
 check  "\$? après syntax error"      $'ls |\necho $?'
-check  "expand dans nom redir"       'echo hi > /tmp/ra_$$_exp.txt 2>/dev/null; rm -f /tmp/ra_$$_exp.txt; echo ok'
-check  "double dollar \$\$"          "echo \$\$"
+#check  "expand dans nom redir"       'echo hi > /tmp/ra_$$_exp.txt 2>/dev/null; rm -f /tmp/ra_$$_exp.txt; echo ok'  # hors sujet : $$ et ;
+#check  "double dollar \$\$"          "echo \$\$"  # hors sujet : $$
 check  "\$? dans variable export"    $'false\nexport X=$?\necho $X'
 
 check  "echo \\n littéral"          'echo \n'
 check  "echo \\t littéral"          'echo \t'
-check  "echo -e flag"               "echo -e 'hello\nworld'"
-check  "echo -E flag"               "echo -E hello"
+#check  "echo -e flag"               "echo -e 'hello\nworld'"  # hors sujet : echo -e
+#check  "echo -E flag"               "echo -E hello"  # hors sujet : echo -E
 check  "printf (externe)"           'printf "%s\n" hello world'
-check  "& background"               "echo hi &"
-check  "; enchaînement"             "echo a; echo b; echo c"
+#check  "& background"               "echo hi &"  # hors sujet : &
+#check  "; enchaînement"             "echo a; echo b; echo c"  # hors sujet : ;
 
 # ── Redirections folles ──
 vcheck "50 fichiers diff >>"         "$(python3 -c "files=' '.join(['>> /tmp/ra_mf{}.txt'.format(i) for i in range(50)]); print('echo hi ' + files)")"
@@ -1132,8 +1132,8 @@ check  "exit pipe: code dernier"       $'exit 12 | exit 13\necho $?'
 check  "exit pipe: rien sur stdout"    "exit 5 | exit 7"
 
 # ── Noms de fichiers spéciaux ──
-check  "fichier avec espace"        "echo hi > '/tmp/ra file spaces.txt'; cat '/tmp/ra file spaces.txt'; rm '/tmp/ra file spaces.txt'"
-check  "fichier commence par -"     "echo hi > /tmp/ra_-dash.txt; cat /tmp/ra_-dash.txt; rm /tmp/ra_-dash.txt"
+#check  "fichier avec espace"        "echo hi > '/tmp/ra file spaces.txt'; cat '/tmp/ra file spaces.txt'; rm '/tmp/ra file spaces.txt'"  # hors sujet : ;
+#check  "fichier commence par -"     "echo hi > /tmp/ra_-dash.txt; cat /tmp/ra_-dash.txt; rm /tmp/ra_-dash.txt"  # hors sujet : ;
 
 # ── FD / descripteurs ──
 vcheck "ls /proc/self/fd"           "ls /proc/self/fd 2>/dev/null | wc -l"
@@ -1237,7 +1237,7 @@ check  "exit builtin > shadow exit"  "$(printf 'export PATH=%s:$PATH\necho befor
 check  "cd builtin > shadow cd"      "$(printf 'export PATH=%s:$PATH\ncd /tmp\npwd' "$_FP")"
 check  "export builtin > shadow"     "$(printf 'export PATH=%s:$PATH\nexport TESTV=ok\necho $TESTV' "$_FP")"
 check  "unset builtin > shadow"      "$(printf 'export PATH=%s:$PATH\nexport UV=x\nunset UV\necho $UV' "$_FP")"
-check  "env builtin > shadow"        "$(printf 'export PATH=%s:$PATH\nenv | grep -c PATH' "$_FP")"
+#check  "env builtin > shadow"        "$(printf 'export PATH=%s:$PATH\nenv | grep -c PATH' "$_FP")"  # hors sujet : builtin priority vs PATH
 check  "pwd builtin > shadow"        "$(printf 'export PATH=%s:$PATH\npwd' "$_FP")"
 
 # ── Faux binaires dans PATH ──
@@ -1285,9 +1285,9 @@ check_ei "env-i : commande trouvée sans PATH"    "echo hello | cat"
 
 # ── Commandes de base fonctionnent ──
 check_ei "env-i : echo hello"                    "echo hello"
-check_ei "env-i : exit 0"                        "echo ok ; exit 0"
+#check_ei "env-i : exit 0"                        "echo ok ; exit 0"  # hors sujet : ;
 check_ei "env-i : exit code 0 au départ"         "echo \$?"
-check_ei "env-i : cmd inconnue = exit 127"       "commande_inconnue_xyz_42 ; echo \$?"
+#check_ei "env-i : cmd inconnue = exit 127"       "commande_inconnue_xyz_42 ; echo \$?"  # hors sujet : ;
 
 # ── Après cd — mise à jour de PWD ──
 check_ei "env-i : cd /tmp — PWD mis à jour"      "$(printf 'cd /tmp\nenv | grep "^PWD="')"
@@ -1321,7 +1321,7 @@ check_ei "env-i : unset var — disparaît de env"  "$(printf 'export MYVAR=hell
 
 # ── Pipes + redirections dans env vide ──
 check_ei "env-i : pipe echo | cat"               "echo hello | cat"
-check_ei "env-i : redirect out"                  "echo hi > /tmp/ra_ei_out_$$ ; cat /tmp/ra_ei_out_$$ ; rm -f /tmp/ra_ei_out_$$"
+#check_ei "env-i : redirect out"                  "echo hi > /tmp/ra_ei_out_$$ ; cat /tmp/ra_ei_out_$$ ; rm -f /tmp/ra_ei_out_$$"  # hors sujet : $$ et ;
 check_ei "env-i : heredoc basique"               $'cat <<EOF\nhello\nEOF'
 
 # ══════════════════════════════════════════════
@@ -1339,7 +1339,7 @@ check  "echo Hola -n (flag après texte)"     "echo Hola -n"
 check  "echo --------n"                      "echo --------n"
 
 # ── Expansion variable — terminateurs inhabituels ──
-check  "echo \$9HOME (param positif + texte)" "echo \$9HOME"
+#check  "echo \$9HOME (param positif + texte)" "echo \$9HOME"  # hors sujet : paramètres positionnels
 check  "echo \$HOME% (% termine le nom)"     "echo \$HOME%"
 check  "echo \$: (char non-ident)"           "echo \$:"
 check  "echo \$= (char non-ident)"           "echo \$="
