@@ -43,6 +43,8 @@ fi
 # Sans ça, le prompt du minishell pollue stdout et les tests échouent tous.
 _TDIR="$(cd "$(dirname "$0")" && pwd)"
 _FAKE_RL="${_TDIR}/fake_readline.so"
+_MINI_PROMPT=""
+
 if [ ! -f "$_FAKE_RL" ]; then
 	if gcc -shared -fPIC -o "$_FAKE_RL" "${_TDIR}/fake_readline.c" -ldl 2>/dev/null; then
 		echo "[INFO] fake_readline.so compilé avec succès"
@@ -51,15 +53,25 @@ if [ ! -f "$_FAKE_RL" ]; then
 		_FAKE_RL=""
 	fi
 fi
+
+# Vérifier que fake_readline.so fonctionne réellement pour ce binaire
+# (certains minishells n'appellent pas readline() → LD_PRELOAD sans effet)
 if [ -n "$_FAKE_RL" ] && [ -f "$_FAKE_RL" ]; then
-	export LD_PRELOAD="$_FAKE_RL"
-	_MINI_PROMPT="MINIT: "
-else
-	# Fallback : le prompt se termine par "exit" (via printf("exit\n") sur EOF)
+	_verify=$(printf '' | timeout 2 env LD_PRELOAD="$_FAKE_RL" "$MINI" 2>/dev/null)
+	if printf '%s' "$_verify" | grep -qF "MINIT:"; then
+		export LD_PRELOAD="$_FAKE_RL"
+		_MINI_PROMPT="MINIT: "
+	else
+		echo "[WARN] fake_readline.so sans effet sur ce binaire — détection dynamique du prompt"
+		_FAKE_RL=""
+	fi
+fi
+
+# Fallback : détecter le prompt en lançant le minishell sur entrée vide
+if [ -z "$_MINI_PROMPT" ]; then
 	_raw=$(printf '' | timeout 2 "$MINI" 2>/dev/null)
 	_MINI_PROMPT="${_raw%exit}"
-	# Strip ANSI escape codes from the prompt to avoid breaking the Perl regex
-	_MINI_PROMPT=$(printf '%s' "$_MINI_PROMPT" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g; s/\x1B[()]//g')
+	# Garder les codes ANSI : quotemeta les gère, et mini_out les aura aussi → matching correct.
 fi
 
 # Crée readline.supp si absent
@@ -183,14 +195,28 @@ else
 fi
 
 normalize() {
+	perl -pe 's/\x1B\[[0-9;]*[a-zA-Z]//g; s/\x1B.//g' |
 	sed 's/^bash: line [0-9]*: //' | sed "s/^$(basename "$MINI"): //"
+}
+
+strip_ansi() {
+	perl -pe 's/\x1B\[[0-9;]*[a-zA-Z]//g; s/\x1B.//g'
 }
 
 strip_prompt() {
 	[ -z "$_MINI_PROMPT" ] && cat && return
 	# Passe le prompt via variable d'env + quotemeta() pour éviter toute injection
 	# dans la regex Perl (/, \, $, ANSI, etc. dans le prompt de l'élève).
-	MINI_PROMPT="$_MINI_PROMPT" perl -0777 -pe 'BEGIN { $p = quotemeta($ENV{MINI_PROMPT}) } s/$p[^\n]*\n?//g'
+	# Si Perl échoue malgré tout, on restitue l'entrée brute (pas de faux OK).
+	local _raw
+	_raw=$(cat)
+	local _stripped
+	_stripped=$(printf '%s' "$_raw" | MINI_PROMPT="$_MINI_PROMPT" perl -0777 -pe 'BEGIN { $p = quotemeta($ENV{MINI_PROMPT}) } s/$p[^\n]*\n?//g' 2>/dev/null)
+	if [ $? -eq 0 ]; then
+		printf '%s' "$_stripped"
+	else
+		printf '%s' "$_raw"
+	fi
 }
 
 # Retourne 0-100 : % de mots de $1 présents dans $2
@@ -229,41 +255,54 @@ should_display() {
 }
 
 # Écriture dans le log (texte propre, sans codes ANSI)
-log() { printf '%s\n' "$*" >> "$LOGFILE"; }
+log() { printf '%s\n' "$*" | perl -pe 's/\x1B\[[0-9;]*[a-zA-Z]//g; s/\x1B.//g' >> "$LOGFILE"; }
 
 log_header() {
 	log ""
-	log "════════════════════════════════════════════════════"
+	log "=================================================="
 	log "  $1"
-	log "════════════════════════════════════════════════════"
+	log "=================================================="
 }
 
 log_test() {
 	local num="$1" desc="$2" status="$3" input="$4"
 	local mini_o="$5" mini_e="$6" mini_x="$7"
 	local bash_o="$8" bash_e="$9" bash_x="${10}"
-	local leak_info="${11}"
+	local vg_info="${11}"
 
-	log ""
-	log "Test ${num}: ${desc}  [${status}]"
-	log "\$> $(echo "$input" | head -1)"
-	if [ "$status" = "OK" ] || [ "$status" = "OK+LEAK" ]; then
-		[ -n "$mini_o" ] && log "  sortie : $(echo "$mini_o" | head -3 | tr '\n' '|' | sed 's/|$//')"
-	else
-		log "  minishell [exit=${mini_x}]:"
-		[ -n "$mini_o" ] && log "    stdout : $(echo "$mini_o" | head -3 | tr '\n' '↵ ' | sed 's/ $//')"
-		[ -n "$mini_e" ] && log "    stderr : $(echo "$mini_e" | head -3 | tr '\n' '↵ ' | sed 's/ $//')"
-		[ "$mini_x" != "$bash_x" ] && log "  !! exit code différent : minishell=${mini_x}  bash=${bash_x}"
-		[ "$mini_o" != "$bash_o" ] && log "  !! stdout différent"
-		[ "$mini_e" != "$bash_e" ] && log "  !! stderr différent"
+	log "[${status}] Test ${num}: ${desc}"
+	log "  cmd  : $(printf '%s' "$input" | head -1)"
+	log "  mini : exit=${mini_x}  out=$(printf '%s' "$mini_o" | head -1 | cut -c1-100)"
+	[ -n "$mini_e" ] && log "  mini : stderr=$(printf '%s' "$mini_e" | head -1 | cut -c1-100)"
+	if [ "$status" != "OK" ] && [ "$status" != "OK+LEAK" ]; then
+		log "  bash : exit=${bash_x}  out=$(printf '%s' "$bash_o" | head -1 | cut -c1-100)"
+		[ -n "$bash_e" ] && log "  bash : stderr=$(printf '%s' "$bash_e" | head -1 | cut -c1-100)"
+		[ "$mini_x" != "$bash_x" ] && log "  diff : exit code (mini=${mini_x} bash=${bash_x})"
+		[ "$mini_o" != "$bash_o" ] && log "  diff : stdout"
+		[ "$mini_e" != "$bash_e" ] && log "  diff : stderr"
 	fi
-	if [ -n "$leak_info" ]; then
-		log "  --- VALGRIND OUTPUT COMPLET ---"
+	if [ -n "$vg_info" ]; then
+		log "  [valgrind]"
 		while IFS= read -r line; do
-			log "    $line"
-		done <<< "$leak_info"
-		log "  --- FIN VALGRIND ---"
+			[ -n "$line" ] && log "    $line"
+		done <<< "$vg_info"
 	fi
+	log ""
+}
+
+log_vcheck() {
+	local num="$1" desc="$2" status="$3" input="$4" mini_x="$5" mini_o="$6" vg_info="$7"
+
+	log "[${status}] Test ${num}: ${desc}"
+	log "  cmd  : $(printf '%s' "$input" | head -1)"
+	log "  mini : exit=${mini_x}  out=$(printf '%s' "$mini_o" | head -1 | cut -c1-100)"
+	if [ -n "$vg_info" ]; then
+		log "  [valgrind]"
+		while IFS= read -r line; do
+			[ -n "$line" ] && log "    $line"
+		done <<< "$vg_info"
+	fi
+	log ""
 }
 
 # ─────────────────────────────────────────────
@@ -277,10 +316,11 @@ check() {
 	mini_out=$(printf '%s' "$input" | timeout 5 "$MINI" 2>/tmp/ra_mini_err_$$)
 	mini_exit=$?
 	mini_err=$(cat /tmp/ra_mini_err_$$ | normalize)
-	mini_out=$(printf '%s' "$mini_out" | strip_prompt)
+	mini_out=$(printf '%s' "$mini_out" | strip_prompt | strip_ansi)
 
 	bash_out=$(printf '%s' "$input" | timeout 5 bash --norc --noprofile 2>/tmp/ra_bash_err_$$)
 	bash_exit=$?
+	bash_out=$(printf '%s' "$bash_out" | strip_ansi)
 	bash_err=$(cat /tmp/ra_bash_err_$$ | normalize)
 
 	rm -f /tmp/ra_mini_err_$$ /tmp/ra_bash_err_$$
@@ -325,6 +365,11 @@ check() {
 	fi
 	[ $leak -eq 1 ] && status="${status}+LEAK"
 
+	# Log systématique de tous les tests
+	log_test "$TEST_NUM" "$desc" "$status" "$input" \
+		"$mini_out" "$mini_err" "$mini_exit" \
+		"$bash_out" "$bash_err" "$bash_exit" "$vg_full"
+
 	if should_display $fail $warn $leak 0; then
 		printf "\n"
 		if [ $fail -eq 1 ]; then
@@ -335,22 +380,19 @@ check() {
 			echo -e "${GREEN}[OK  ]${NC} ${desc}"
 		fi
 		echo -e "  ${CYAN}\$>${NC} $(echo "$input" | head -1)"
-		echo -e "  ${GREEN}my minishell${NC} [exit=${mini_exit}]: $(echo "${mini_out}${mini_err}" | head -3 | tr '\n' ' ')"
+		echo -e "  ${GREEN}mini${NC} [exit=${mini_exit}]: $(echo "${mini_out}${mini_err}" | head -3 | tr '\n' ' ')"
 		if [ $fail -eq 1 ]; then
-			echo -e "  ${YELLOW}bash         ${NC} [exit=${bash_exit}]: $(echo "${bash_out}${bash_err}" | head -3 | tr '\n' ' ')"
-			[ "$mini_exit" != "$bash_exit" ] && echo -e "  ${RED}!! exit différent${NC}"
+			echo -e "  ${YELLOW}bash${NC} [exit=${bash_exit}]: $(echo "${bash_out}${bash_err}" | head -3 | tr '\n' ' ')"
+			[ "$mini_exit" != "$bash_exit" ] && echo -e "  ${RED}!! exit différent${NC} (mini=${mini_exit} bash=${bash_exit})"
 			[ "$mini_out"  != "$bash_out"  ] && echo -e "  ${RED}!! stdout différent${NC}"
 			[ "$mini_err"  != "$bash_err"  ] && echo -e "  ${RED}!! stderr différent${NC}"
 		elif [ $warn -eq 1 ]; then
-			echo -e "  ${YELLOW}!! stderr différent${NC}"
+			echo -e "  ${YELLOW}!! stderr inattendu${NC}: $(echo "$mini_err" | head -1)"
 		fi
 		if [ $leak -eq 1 ]; then
-			echo -e "  ${RED}leaks valgrind:${NC}"
+			echo -e "  ${RED}leaks:${NC}"
 			echo "$vg_full" | grep -v "^$" | sed 's/^/    /'
 		fi
-		log_test "$TEST_NUM" "$desc" "$status" "$input" \
-			"$mini_out" "$mini_err" "$mini_exit" \
-			"$bash_out" "$bash_err" "$bash_exit" "$vg_full"
 	fi
 	_progress
 }
@@ -369,10 +411,11 @@ check_ei() {
 	fi
 	mini_exit=$?
 	mini_err=$(cat /tmp/ra_mini_err_$$ | normalize)
-	mini_out=$(printf '%s' "$mini_out" | strip_prompt)
+	mini_out=$(printf '%s' "$mini_out" | strip_prompt | strip_ansi)
 
 	bash_out=$(printf '%s' "$input" | timeout 5 env -i bash --norc --noprofile 2>/tmp/ra_bash_err_$$)
 	bash_exit=$?
+	bash_out=$(printf '%s' "$bash_out" | strip_ansi)
 	bash_err=$(cat /tmp/ra_bash_err_$$ | normalize)
 
 	rm -f /tmp/ra_mini_err_$$ /tmp/ra_bash_err_$$
@@ -396,6 +439,10 @@ check_ei() {
 		status="OK"; ((TOTAL_PASS++))
 	fi
 
+	log_test "$TEST_NUM" "$desc" "$status" "$input" \
+		"$mini_out" "$mini_err" "$mini_exit" \
+		"$bash_out" "$bash_err" "$bash_exit" ""
+
 	if should_display $fail $warn 0 0; then
 		printf "\n"
 		if [ $fail -eq 1 ]; then
@@ -406,18 +453,15 @@ check_ei() {
 			echo -e "${GREEN}[OK  ]${NC} ${desc}"
 		fi
 		echo -e "  ${CYAN}\$>${NC} $(echo "$input" | head -1)"
-		echo -e "  ${GREEN}my minishell${NC} [exit=${mini_exit}]: $(echo "${mini_out}${mini_err}" | head -3 | tr '\n' ' ')"
+		echo -e "  ${GREEN}mini${NC} [exit=${mini_exit}]: $(echo "${mini_out}${mini_err}" | head -3 | tr '\n' ' ')"
 		if [ $fail -eq 1 ]; then
-			echo -e "  ${YELLOW}bash         ${NC} [exit=${bash_exit}]: $(echo "${bash_out}${bash_err}" | head -3 | tr '\n' ' ')"
-			[ "$mini_exit" != "$bash_exit" ] && echo -e "  ${RED}!! exit différent${NC}"
+			echo -e "  ${YELLOW}bash${NC} [exit=${bash_exit}]: $(echo "${bash_out}${bash_err}" | head -3 | tr '\n' ' ')"
+			[ "$mini_exit" != "$bash_exit" ] && echo -e "  ${RED}!! exit différent${NC} (mini=${mini_exit} bash=${bash_exit})"
 			[ "$mini_out"  != "$bash_out"  ] && echo -e "  ${RED}!! stdout différent${NC}"
 			[ "$mini_err"  != "$bash_err"  ] && echo -e "  ${RED}!! stderr différent${NC}"
 		elif [ $warn -eq 1 ]; then
-			echo -e "  ${YELLOW}!! stderr différent${NC}"
+			echo -e "  ${YELLOW}!! stderr inattendu${NC}: $(echo "$mini_err" | head -1)"
 		fi
-		log_test "$TEST_NUM" "$desc" "$status" "$input" \
-			"$mini_out" "$mini_err" "$mini_exit" \
-			"$bash_out" "$bash_err" "$bash_exit" ""
 	fi
 	_progress
 }
@@ -437,28 +481,26 @@ vcheck() {
 		mini_out=$(printf '%s' "$input" | timeout 5 "$MINI" 2>/tmp/ra_mini_err_$$)
 	fi
 	mini_exit=$?
-	mini_out=$(printf '%s' "$mini_out" | strip_prompt)
+	mini_out=$(printf '%s' "$mini_out" | strip_prompt | strip_ansi)
 	rm -f /tmp/ra_mini_err_$$
 
 	if [ $mini_exit -eq 124 ]; then
 		((TOTAL_CRASH++))
+		log_vcheck "$TEST_NUM" "$desc" "TIMEOUT" "$input" "$mini_exit" "$mini_out" ""
 		if should_display 0 0 0 1; then
 			printf "\n"
 			echo -e "${RED}[TIMEOUT]${NC} ${desc}"
 			echo -e "  ${CYAN}\$>${NC} $(echo "$input" | head -1)"
-			log ""; log "Test ${TEST_NUM}: ${desc}  [TIMEOUT]"
-			log "\$> $(echo "$input" | head -1)"
 		fi
 		_progress; return
 	fi
 	if [ $mini_exit -ge 134 ] && [ $mini_exit -le 139 ]; then
 		((TOTAL_CRASH++))
+		log_vcheck "$TEST_NUM" "$desc" "CRASH" "$input" "$mini_exit" "$mini_out" ""
 		if should_display 0 0 0 1; then
 			printf "\n"
 			echo -e "${RED}[CRASH  ]${NC} ${desc} (exit=$mini_exit)"
 			echo -e "  ${CYAN}\$>${NC} $(echo "$input" | head -1)"
-			log ""; log "Test ${TEST_NUM}: ${desc}  [CRASH exit=${mini_exit}]"
-			log "\$> $(echo "$input" | head -1)"
 		fi
 		_progress; return
 	fi
@@ -480,30 +522,23 @@ vcheck() {
 	if [ $NO_VG -eq 0 ] && { [ $vg_code -eq 99 ] || [ -n "$vg_leak" ] || [ -n "$vg_errs" ]; }; then
 		((TOTAL_LEAK++))
 		((TOTAL_PASS++))
+		log_vcheck "$TEST_NUM" "$desc" "LEAK" "$input" "$mini_exit" "$mini_out" "$vg_full"
 		if should_display 0 0 1 0; then
 			printf "\n"
 			echo -e "${RED}[LEAK  ]${NC} ${desc}"
 			echo -e "  ${CYAN}\$>${NC} $(echo "$input" | head -1)"
-			echo -e "  ${GREEN}my minishell${NC} [exit=${mini_exit}]: $(echo "${mini_out}" | head -3 | tr '\n' ' ')"
-			echo -e "  ${RED}leaks valgrind:${NC}"
+			echo -e "  ${GREEN}mini${NC} [exit=${mini_exit}]: $(echo "${mini_out}" | head -3 | tr '\n' ' ')"
+			echo -e "  ${RED}leaks:${NC}"
 			echo "$vg_full" | grep -v "^$" | sed 's/^/    /'
-			log ""; log "Test ${TEST_NUM}: ${desc}  [LEAK]"
-			log "\$> $(echo "$input" | head -1)"
-			log "  --- VALGRIND OUTPUT COMPLET ---"
-			while IFS= read -r line; do
-				log "    $line"
-			done <<< "$vg_full"
-			log "  --- FIN VALGRIND ---"
 		fi
 	else
 		((TOTAL_PASS++))
+		log_vcheck "$TEST_NUM" "$desc" "CLEAN" "$input" "$mini_exit" "$mini_out" ""
 		if should_display 0 0 0 0; then
 			printf "\n"
 			echo -e "${GREEN}[CLEAN ]${NC} ${desc}"
 			echo -e "  ${CYAN}\$>${NC} $(echo "$input" | head -1)"
-			echo -e "  ${GREEN}my minishell${NC} [exit=${mini_exit}]: $(echo "${mini_out}" | head -3 | tr '\n' ' ')"
-			log ""; log "Test ${TEST_NUM}: ${desc}  [OK]"
-			log "\$> $(echo "$input" | head -1)"
+			echo -e "  ${GREEN}mini${NC} [exit=${mini_exit}]: $(echo "${mini_out}" | head -3 | tr '\n' ' ')"
 		fi
 	fi
 	_progress
@@ -534,7 +569,11 @@ _BEFORE_FILES=$(ls -1 . 2>/dev/null | sort)
 
 # ─────────────────────────────────────────────
 echo -e "${CYAN}================================================================${NC}"
-echo -e "${CYAN}  MINISHELL — ALL TESTS + VALGRIND${NC}"
+if [ $NO_VG -eq 1 ]; then
+	echo -e "${CYAN}  MINISHELL — ALL TESTS  (sans valgrind — mode rapide)${NC}"
+else
+	echo -e "${CYAN}  MINISHELL — ALL TESTS + VALGRIND${NC}"
+fi
 if [ "$SEC_FROM" -ne 1 ] || [ "$SEC_TO" -lt 22 ]; then
 	if [ "$SEC_FROM" -eq "$SEC_TO" ]; then
 		echo -e "${CYAN}  Filtre : catégorie [$SEC_FROM] uniquement  ($TOTAL_TESTS tests)${NC}"
@@ -543,6 +582,20 @@ if [ "$SEC_FROM" -ne 1 ] || [ "$SEC_TO" -lt 22 ]; then
 	fi
 fi
 echo -e "${CYAN}================================================================${NC}"
+
+# En-tête du log
+log "Minishell Tester"
+log "Date    : $(date '+%Y-%m-%d %H:%M:%S')"
+log "Binaire : $MINI"
+if [ $NO_VG -eq 1 ]; then
+	log "Mode    : sans valgrind (--l)"
+else
+	log "Mode    : avec valgrind"
+fi
+if [ "$SEC_FROM" -ne 1 ] || [ "$SEC_TO" -lt 99 ]; then
+	log "Sections: [$SEC_FROM] a [$SEC_TO]"
+fi
+log ""
 
 # ══════════════════════════════════════════════
 section "[1] PIPES"
@@ -1007,20 +1060,32 @@ sigtest() {
 	local crash=0
 	[ $exit_code -ge 134 ] && [ $exit_code -le 139 ] && crash=1
 
+	local status
 	if [ $crash -eq 1 ]; then
+		status="CRASH"
 		((TOTAL_CRASH++))
+	else
+		status="OK"
+		((TOTAL_PASS++))
+	fi
+
+	log "[${status}] Test ${TEST_NUM}: ^C -> ${desc}"
+	log "  cmd  : $(printf '%s' "$pre_input" | head -1)  [^C apres ${delay}s]"
+	log "  mini : exit=${exit_code}"
+	log ""
+
+	if [ $crash -eq 1 ]; then
 		if should_display 0 0 0 1; then
+			printf "\n"
 			echo -e "${RED}[CRASH  ]${NC} ^C → ${desc} (exit=$exit_code)"
 			echo -e "  ${CYAN}\$>${NC} $(echo "$pre_input" | head -1)  [^C après ${delay}s]"
 		fi
-		log ""; log "Test ${TEST_NUM}: ^C → ${desc}  [CRASH exit=${exit_code}]"
 	else
-		((TOTAL_PASS++))
 		if should_display 0 0 0 0; then
+			printf "\n"
 			echo -e "${GREEN}[OK  ]${NC} ^C → ${desc} (exit=$exit_code)"
 			echo -e "  ${CYAN}\$>${NC} $(echo "$pre_input" | head -1)"
 		fi
-		log ""; log "Test ${TEST_NUM}: ^C → ${desc}  [OK exit=${exit_code}]"
 	fi
 }
 
@@ -1676,9 +1741,9 @@ echo -e "${RED}LEAKS  : $TOTAL_LEAK${NC}"
 echo -e "${RED}CRASH  : $TOTAL_CRASH${NC}"
 
 log ""
-log "════════════════════════════════════════════════════"
+log "=================================================="
 log "  RECAP GLOBAL  ($(date '+%Y-%m-%d %H:%M:%S'))"
-log "════════════════════════════════════════════════════"
+log "=================================================="
 log "  TOTAL TESTS : $TEST_NUM"
 log "  PASS        : $TOTAL_PASS"
 log "  FAIL        : $TOTAL_FAIL"

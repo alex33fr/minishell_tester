@@ -16,7 +16,8 @@ Automated test suite for minishell projects. Compares your shell against bash on
 
 ```bash
 # Copy run_all.sh into your project root, then:
-./run_all.sh
+./run_all.sh          # full run with valgrind
+./run_all.sh --l      # full run without valgrind (much faster)
 ```
 
 ---
@@ -24,7 +25,7 @@ Automated test suite for minishell projects. Compares your shell against bash on
 ## Usage
 
 ```
-./run_all.sh [N | N-M] [-e [N | N-M]] [-c] [-l] [-w]
+./run_all.sh [N | N-M] [-e [N | N-M]] [-c] [-l] [-w] [--l]
 ```
 
 ### Section filter (positional)
@@ -45,6 +46,7 @@ Without any flag, **every result type** is shown. Adding a flag restricts output
 | `-w` | **WARN** — minishell printed unexpected stderr |
 | `-l` | **LEAK** — valgrind detected a memory leak or invalid access |
 | `-c` | **CRASH** — segfault, killed by signal, or timeout |
+| `--l` | **No valgrind** — show all result types but skip valgrind entirely (much faster) |
 
 Flags are **fully combinable** in any order:
 
@@ -58,6 +60,8 @@ Flags are **fully combinable** in any order:
 ./run_all.sh 5-7 -cl         # CRASHes + LEAKs in sections 5 to 7
 ./run_all.sh -e 8 -l         # FAILs + LEAKs in section 8
 ./run_all.sh 22-34           # run only the extended sections
+./run_all.sh --l             # full run, no valgrind (quick check)
+./run_all.sh 8 --l           # section 8, no valgrind
 ```
 
 ### Binary override
@@ -66,7 +70,15 @@ Flags are **fully combinable** in any order:
 MINI_BIN=./my_binary ./run_all.sh
 ```
 
-By default the script looks for `./minishell`. Use `MINI_BIN` to point to a different binary (compilation still runs, but the specified binary is used for tests).
+By default the script looks for `../minishell`. Use `MINI_BIN` to point to a different binary (compilation still runs, but the specified binary is used for tests).
+
+---
+
+## Prompt detection
+
+The tester uses `fake_readline.so` (compiled automatically) to intercept `readline()` and force a fixed prompt `MINIT: `, so the prompt never pollutes the test output.
+
+If the minishell does not use `readline()` (static build, custom input function, etc.), the script detects this automatically and falls back to dynamic prompt detection: it runs the minishell on empty input, captures whatever prompt it prints, and uses that to strip prompts from all test outputs. ANSI color codes in the prompt are handled correctly.
 
 ---
 
@@ -86,8 +98,8 @@ Leak detection appends a suffix to any status:
 
 ```
 [OK  ] simple pipe          → correct output, no leak
-[OK  ]+LEAK simple pipe     → correct output but leaks
-[FAIL]+LEAK simple pipe     → wrong output and leaks
+[OK  +LEAK] simple pipe     → correct output but leaks
+[FAIL+LEAK] simple pipe     → wrong output and leaks
 ```
 
 ### Colors
@@ -105,13 +117,28 @@ The progress counter `[XX%] N/TOTAL` is updated in place on the same line.
 
 ## Log file
 
-Every run **overwrites** `logs_full_test.txt` with a plain-text (no ANSI) copy of all results. Full valgrind output is included for every leaking test.
+Every run **overwrites** `logs_full_test.txt` with a plain-text (no ANSI codes) record of **every test**, not just failures. The file starts with a header showing the date, binary path, and mode.
+
+Format per test:
+```
+[FAIL] Test 5: pipe no left
+  cmd  : | ls
+  mini : exit=0  out=
+  bash : exit=2  out=
+  diff : exit code (mini=0 bash=2)
+  diff : stderr
+
+[OK] Test 13: pipe 20x ls
+  cmd  : ls | ls | ls | ...
+  mini : exit=0  out=check_allowed.sh
+```
 
 ```bash
 # Useful greps after a run:
-grep FAIL logs_full_test.txt
-grep LEAK logs_full_test.txt
-grep CRASH logs_full_test.txt
+grep "^\[FAIL\]" logs_full_test.txt
+grep "^\[CRASH\]" logs_full_test.txt
+grep "^\[LEAK\]" logs_full_test.txt
+grep "diff :" logs_full_test.txt
 ```
 
 ---
@@ -190,7 +217,6 @@ Valgrind options used:
 --show-leak-kinds=all
 --track-fds=yes
 --track-origins=yes
---trace-children=yes
 --error-exitcode=99
 -q
 ```
@@ -210,6 +236,9 @@ After each run the script removes:
 ## Tips
 
 ```bash
+# Quick full check without valgrind (much faster)
+./run_all.sh --l
+
 # Focus on your worst bugs first
 ./run_all.sh -e          # all failures
 ./run_all.sh -ec         # failures + crashes
@@ -217,13 +246,15 @@ After each run the script removes:
 # Debug a specific category
 ./run_all.sh 8           # export tests only
 ./run_all.sh 8 -e        # only failing export tests
+./run_all.sh 8 --l       # section 8, no valgrind
 
 # Check memory only
 ./run_all.sh -l          # all leaks
 ./run_all.sh 1-5 -l      # leaks in pipes, redirections, heredoc, quotes, variables
 ./run_all.sh 18-21 -e    # failures in edge-case / env-i sections
 
-# Full log review after a run
-grep -A5 "FAIL" logs_full_test.txt
-grep -A20 "LEAK" logs_full_test.txt
+# Read the log
+grep "^\[FAIL\]" logs_full_test.txt
+grep "diff :" logs_full_test.txt
+grep -A5 "^\[FAIL\]" logs_full_test.txt
 ```
