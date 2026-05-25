@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Lance toute la suite de tests avec valgrind (make re automatique)
-# Usage: bash run_all.sh [N|N-M] [-e [N|N-M]] [-c] [-l] [-w]
+# Usage: bash run_all.sh [N|N-M] [-e [N|N-M]] [-c] [-l] [-w] [--l]
 #   5        = catégorie 5 uniquement              ex: ./run_all.sh 5
 #   5-7      = catégories 5 à 7                   ex: ./run_all.sh 5-7
 #   -e N     = catégorie N + afficher FAIL         ex: -e 5
@@ -10,6 +10,7 @@
 #   -c = CRASH   -l = LEAK   -w = WARN
 #   combinable: 8 -l   -e 8 -l   5-7 -cl   -eclw   etc.
 #   (sans flag = tout afficher)
+#   --l      = tout afficher, SANS valgrind (rapide)
 # Logs : logs_full_test.txt (écrasé à chaque run)
 
 cd "$(dirname "$0")"
@@ -57,6 +58,8 @@ else
 	# Fallback : le prompt se termine par "exit" (via printf("exit\n") sur EOF)
 	_raw=$(printf '' | timeout 2 "$MINI" 2>/dev/null)
 	_MINI_PROMPT="${_raw%exit}"
+	# Strip ANSI escape codes from the prompt to avoid breaking the Perl regex
+	_MINI_PROMPT=$(printf '%s' "$_MINI_PROMPT" | sed 's/\x1B\[[0-9;]*[a-zA-Z]//g; s/\x1B[()]//g')
 fi
 
 # Crée readline.supp si absent
@@ -133,12 +136,16 @@ SKIP_SECTION=0
 # -e N-M   = catégories N à M
 # -e       = toutes les catégories, afficher seulement FAIL
 # -c=CRASH  -l=LEAK  -w=WARN  (combinables : -cl -eclw …)
+# --l      = tout afficher, sans valgrind (rapide)
 SHOW_E=0; SHOW_C=0; SHOW_L=0; SHOW_W=0
+NO_VG=0
 SEC_FROM=1; SEC_TO=99
 i=1
 while [ $i -le $# ]; do
 	arg="${!i}"
-	if [[ "$arg" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+	if [[ "$arg" == "--l" ]]; then
+		NO_VG=1; SHOW_E=1; SHOW_C=1; SHOW_L=1; SHOW_W=1
+	elif [[ "$arg" =~ ^([0-9]+)-([0-9]+)$ ]]; then
 		# bare range: ./run_all.sh 5-7
 		SEC_FROM=${BASH_REMATCH[1]}; SEC_TO=${BASH_REMATCH[2]}
 	elif [[ "$arg" =~ ^([0-9]+)$ ]]; then
@@ -279,12 +286,15 @@ check() {
 
 	rm -f /tmp/ra_mini_err_$$ /tmp/ra_bash_err_$$
 
-	vg_out=$(printf '%s' "$input" | timeout 10 $VG "$MINI" 2>/tmp/ra_vg_$$)
-	vg_code=$?
-	vg_full=$(cat /tmp/ra_vg_$$)
-	vg_leak=$(grep -E "definitely lost|indirectly lost|still reachable" /tmp/ra_vg_$$ | grep -v "0 bytes")
-	vg_err2=$(grep "ERROR SUMMARY" /tmp/ra_vg_$$ | grep -v "0 errors")
-	rm -f /tmp/ra_vg_$$
+	local vg_full="" vg_code=0 vg_leak="" vg_err2=""
+	if [ $NO_VG -eq 0 ]; then
+		vg_out=$(printf '%s' "$input" | timeout 10 $VG "$MINI" 2>/tmp/ra_vg_$$)
+		vg_code=$?
+		vg_full=$(cat /tmp/ra_vg_$$)
+		vg_leak=$(grep -E "definitely lost|indirectly lost|still reachable" /tmp/ra_vg_$$ | grep -v "0 bytes")
+		vg_err2=$(grep "ERROR SUMMARY" /tmp/ra_vg_$$ | grep -v "0 errors")
+		rm -f /tmp/ra_vg_$$
+	fi
 
 	local fail=0
 	local warn=0
@@ -298,7 +308,7 @@ check() {
 		[ "$_sim" -lt 50 ] && warn=1
 	fi
 
-	if [ $vg_code -eq 99 ] || [ -n "$vg_leak" ] || [ -n "$vg_err2" ]; then
+	if [ $NO_VG -eq 0 ] && { [ $vg_code -eq 99 ] || [ -n "$vg_leak" ] || [ -n "$vg_err2" ]; }; then
 		leak=1
 		((TOTAL_LEAK++))
 	fi
@@ -454,18 +464,21 @@ vcheck() {
 		_progress; return
 	fi
 
-	if [ -n "$env_prefix" ]; then
-		vg_out=$(printf '%s' "$input" | timeout 10 env -i $_vld $env_prefix $VG "$MINI" 2>/tmp/ra_vg_$$)
-	else
-		vg_out=$(printf '%s' "$input" | timeout 10 $VG "$MINI" 2>/tmp/ra_vg_$$)
+	local vg_full="" vg_code=0 vg_leak="" vg_errs=""
+	if [ $NO_VG -eq 0 ]; then
+		if [ -n "$env_prefix" ]; then
+			vg_out=$(printf '%s' "$input" | timeout 10 env -i $_vld $env_prefix $VG "$MINI" 2>/tmp/ra_vg_$$)
+		else
+			vg_out=$(printf '%s' "$input" | timeout 10 $VG "$MINI" 2>/tmp/ra_vg_$$)
+		fi
+		vg_code=$?
+		vg_full=$(cat /tmp/ra_vg_$$)
+		vg_leak=$(grep -E "definitely lost|indirectly lost|still reachable" /tmp/ra_vg_$$ | grep -v "0 bytes")
+		vg_errs=$(grep "ERROR SUMMARY" /tmp/ra_vg_$$ | grep -v "0 errors")
+		rm -f /tmp/ra_vg_$$
 	fi
-	vg_code=$?
-	vg_full=$(cat /tmp/ra_vg_$$)
-	vg_leak=$(grep -E "definitely lost|indirectly lost|still reachable" /tmp/ra_vg_$$ | grep -v "0 bytes")
-	vg_errs=$(grep "ERROR SUMMARY" /tmp/ra_vg_$$ | grep -v "0 errors")
-	rm -f /tmp/ra_vg_$$
 
-	if [ $vg_code -eq 99 ] || [ -n "$vg_leak" ] || [ -n "$vg_errs" ]; then
+	if [ $NO_VG -eq 0 ] && { [ $vg_code -eq 99 ] || [ -n "$vg_leak" ] || [ -n "$vg_errs" ]; }; then
 		((TOTAL_LEAK++))
 		((TOTAL_PASS++))
 		if should_display 0 0 1 0; then
