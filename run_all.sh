@@ -188,10 +188,9 @@ normalize() {
 
 strip_prompt() {
 	[ -z "$_MINI_PROMPT" ] && cat && return
-	# Supprime toutes les occurrences du prompt + la ligne de commande echo'd.
-	# perl -0777 slurpe l'entrée entière pour gérer le cas où le prompt apparaît
-	# en milieu de ligne (ex: "hiMINIT: next_cmd\n" quand printf n'ajoute pas de \n).
-	perl -0777 -pe 's/\Q'"$_MINI_PROMPT"'\E[^\n]*\n?//g'
+	# Passe le prompt via variable d'env + quotemeta() pour éviter toute injection
+	# dans la regex Perl (/, \, $, ANSI, etc. dans le prompt de l'élève).
+	MINI_PROMPT="$_MINI_PROMPT" perl -0777 -pe 'BEGIN { $p = quotemeta($ENV{MINI_PROMPT}) } s/$p[^\n]*\n?//g'
 }
 
 # Retourne 0-100 : % de mots de $1 présents dans $2
